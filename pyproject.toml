@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rate-limiter-toolkit"
+version = "0.1.0"
+description = "Six dependency-free rate-limiting algorithms plus a reproducible benchmark that measures the traffic each one actually lets through"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = []
+
+[tool.setuptools]
+packages = ["ratelimit"]

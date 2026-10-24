@@ -1,0 +1,119 @@
+rate-limiter-toolkit benchmarks - python 3.11.9
+All limits below are the nominal per-window configuration; the point of
+this file is the measured throughput each algorithm actually grants.
+
+==============================================================================
+Section 1. Trace composition (deterministic)
+==============================================================================
+component                                          events
+poisson background, rate 200/s over 60s             12139
+burst, 400 requests in a 0.05s window                 400
+diurnal wave, base 150/s +-0.7, period 20s           9158
+slow drip, one request every 0.5s                     120
+TOTAL (all components merged)                       21817
+
+Interpretation: the 400-request burst is 3.3x the slow-drip volume, so it
+  dominates any single-window count and is what the fixed-window boundary test
+  leans on.
+
+==============================================================================
+Section 2. Fixed-window over-admission at a boundary (deterministic)
+==============================================================================
+scenario                           fixed admits exact admits over-factor
+2x burst straddling one boundary            200          100      2.000
+
+Interpretation: a full window of traffic just before the boundary and a full
+  window just after is a single 1.000s interval of 200 requests, which the
+  exact sliding window would cap at 100. Fixed window let 200 through, i.e.
+  2.00x the configured limit of 100. This is the textbook 2x, measured, not
+  asserted.
+
+==============================================================================
+Section 3. Sliding-window log memory vs traffic (bytes are deterministic;
+           tracemalloc peak is deterministic on CPython 3.11)
+==============================================================================
+requests       peak bytes  bytes/entry     fixed keys     ctr keys
+10000              321888        32.19              1            1
+100000            3224248        32.24              1            1
+1000000          32249504        32.25              1            1
+
+Interpretation: the exact log tracked 321888 bytes at 10k requests and
+  32249504 bytes at 1e6 requests, a 100.2x jump for 100x the traffic (linear
+  in traffic, as expected); that is about 32.2 bytes per stored request. The
+  fixed-window and sliding-counter limiters held the whole 1e6 requests in 1
+  and 1 state entries respectively, because they key by window, not by
+  request.
+
+==============================================================================
+Section 4. Interpolated sliding-counter vs exact log (deterministic)
+==============================================================================
+metric                              value
+max abs count error                 0.999
+counter over-admissions               198
+counter under-admissions              209
+exact-log total admits                240
+counter total admits                  229
+
+Interpretation: on this 4000-request stream the interpolated counter's running
+  count deviated from the exact log by at most 0.999 requests (against a limit
+  of 20), yet its total admitted volume still landed -4.58% off the exact
+  figure (229 vs 240). It disagreed with the exact log on 407 individual
+  decisions, 198 of them admitting traffic the exact log would have blocked. A
+  sub-request estimate error is enough to flip a decision whenever the count
+  sits right at the threshold, and the bias is not one-sided.
+
+==============================================================================
+Section 5. GCRA vs token bucket (deterministic)
+==============================================================================
+metric                         token bucket           GCRA        delta
+total admits                             74             74            0
+total rejects                           181            181            0
+peak admits / 1s                         23             23            0
+wait @ first reject                  0.1896         0.1896       0.0000
+sum promised wait                     26.39          26.39         0.00
+
+Interpretation: on a 255-request spike GCRA and the token bucket agreed on
+  every column - total admits (74 vs 74, difference 0), the 181 shared
+  rejects, the densest one-second count (23 vs 23), the first rejected
+  caller's promise (0.190s vs 0.190s) and the promise summed over all
+  rejections (26.4s vs 26.4s). That is not a measurement artefact: setting
+  GCRA's delay tolerance to capacity*emission makes it algebraically the token
+  bucket wearing one float (the theoretical arrival time) instead of two
+  (tokens + last-refill). So the folklore that GCRA and the bucket hand
+  callers a *different wait time* does not survive this data - the honest
+  difference is state size, not behaviour.
+
+==============================================================================
+Section 6. Per-key fairness under a skewed trace (deterministic)
+==============================================================================
+key           offered     isolated       shared
+hot              1362          160          115
+warm              380          160           20
+cold-1            125          125           13
+cold-2            133          132           12
+
+Interpretation: the hot key offered 68% of all traffic. Isolated per-key
+  budgets gave it 27.7% of admitted requests, the shared budget gave it 71.9%.
+  With isolation the two cold keys still got 125 and 132 admits; on a single
+  shared pool they were crowded to 13 and 12. Fairness is a routing policy,
+  not an algorithm property - the same FixedWindowLimiter produced both
+  outcomes.
+
+==============================================================================
+Section 7. Steady-rate comparison and per-request timing
+==============================================================================
+           admitted columns are deterministic; the ms column is timing and
+           varies by machine. Same nominal limit 100 / window 1s for all.
+algorithm            events     admitted     admit-rate  ms (timing)
+fixed-window           9458         6000         0.6344         6.22
+sliding-log            9458         5897         0.6235         8.89
+sliding-counter        9458         5902         0.6240         8.43
+token-bucket           9458         6092         0.6441         9.18
+leaky-bucket           9458         6092         0.6441         9.39
+gcra                   9458         6092         0.6441         7.37
+
+Interpretation: on one trace of 9458 requests the six limiters admitted
+  between 5897 and 6092, a spread of 195. The windowed limiters and the rate-
+  based limiters are not interchangeable: burst allowance and boundary
+  behaviour push the same nominal limit to different real throughput. Timing
+  is reported separately because it is not reproducible across machines.
